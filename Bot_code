@@ -1,0 +1,97 @@
+import asyncio
+from datetime import datetime
+from collections import defaultdict
+import pandas as pd
+import requests
+from io import StringIO
+from telegram import Bot
+from apscheduler.schedulers.blocking import BlockingScheduler
+
+# -----------------------------
+TELEGRAM_TOKEN = ""  # Token from BotFather
+CHAT_ID = ""         # Telegram chat_id
+SHEET_URL = ""
+# -----------------------------
+
+def get_sheet_df():
+    """Get public Google Sheet CSV"""
+    sheet_csv_url = SHEET_URL.replace("/edit?usp=sharing", "/gviz/tq?tqx=out:csv")
+    r = requests.get(sheet_csv_url)
+    if r.status_code != 200:
+        print("❌ Google Sheet URL is incorrect or not public!")
+        return pd.DataFrame()
+    data = StringIO(r.text)
+    df = pd.read_csv(data, engine='python', on_bad_lines="skip")
+    return df
+
+def generate_report(df):
+    if df.empty:
+        return "❌ No data found in sheet."
+
+    today = datetime.now().date()  # only year-month-day
+
+    # Parse date column
+    if 'Sana' not in df.columns:
+        print("❌ Column 'Sana' not found in sheet!")
+        return "❌ Sheet format error!"
+
+    # parse all possible formats
+    df['Sana_parsed'] = pd.to_datetime(
+        df['Sana'].astype(str),
+        dayfirst=True,
+        errors='coerce'
+    )
+
+    if df['Sana_parsed'].isna().all():
+        print("❌ Date parsing error!")
+        return "❌ Could not read dates in sheet!"
+
+    total_sum = 0
+    by_person = defaultdict(int)
+    by_region = defaultdict(int)
+
+    for idx, row in df.iterrows():
+        if pd.isna(row['Sana_parsed']):
+            continue
+        if row['Sana_parsed'].date() == today:
+            try:
+                # clean amount column and convert to int
+                amount = int(str(row['Summa']).replace(" ", "").replace(",", ""))
+                total_sum += amount
+                by_person[row['Kimdan']] += amount
+                by_region[row['Viloyat']] += amount
+            except (KeyError, ValueError):
+                continue
+
+    if total_sum == 0:
+        return f"📅 {today.strftime('%d.%m.%Y')}\n\nNo income today."
+
+    message = f"📅 {today.strftime('%d.%m.%Y')} Daily Report\n\n"
+    message += f"💰 Total income: {total_sum:,} so'm\n\n"
+
+    message += "📌 From whom:\n"
+    for person, amount in by_person.items():
+        message += f"{person} — {amount:,} so'm\n"
+
+    message += "\n🌍 Regions:\n"
+    for region, amount in by_region.items():
+        message += f"{region} — {amount:,} so'm\n"
+
+    return message
+
+async def send_report_async():
+    df = get_sheet_df()
+    report = generate_report(df)
+    bot = Bot(token=TELEGRAM_TOKEN)
+    await bot.send_message(chat_id=CHAT_ID, text=report)
+    print(f"✅ Report sent: {datetime.now().strftime('%H:%M:%S')}")
+
+def send_report():
+    asyncio.run(send_report_async())
+
+scheduler = BlockingScheduler()
+scheduler.add_job(send_report, 'interval', minutes=3)
+
+print("Bot started... 🟢")
+send_report()
+scheduler.start()
